@@ -5,22 +5,24 @@ import (
 	"net/http"
 	"sort"
 
-	gorillaws "github.com/gorilla/websocket"
+	"github.com/gorilla/websocket"
 	"github.com/RITWIZSINGH/DoodleDash-backend/internal/models"
 	"github.com/RITWIZSINGH/DoodleDash-backend/internal/services"
 	"github.com/RITWIZSINGH/DoodleDash-backend/pkg/utils"
-	"github.com/RITWIZSINGH/DoodleDash-backend/pkg/websocket"
+	wsocket "github.com/RITWIZSINGH/DoodleDash-backend/pkg/websocket"
 )
+
 // ServeWS upgrades an HTTP connection to WebSocket
-func ServeWS(hub *websocket.Hub, w http.ResponseWriter, r *http.Request) {
-	conn, err := gorillaws.Upgrader{
+func ServeWS(hub *wsocket.Hub, w http.ResponseWriter, r *http.Request) {
+	upgrader := websocket.Upgrader{
 		ReadBufferSize:  1024,
 		WriteBufferSize: 1024,
 		CheckOrigin: func(r *http.Request) bool {
 			return true // In production, implement proper origin checking
 		},
-	}.Upgrade(w, r, nil)
-	}.Upgrade(w, r, nil)
+	}
+	
+	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Printf("WebSocket upgrade error: %v", err)
 		http.Error(w, "WebSocket upgrade failed", http.StatusBadRequest)
@@ -29,7 +31,7 @@ func ServeWS(hub *websocket.Hub, w http.ResponseWriter, r *http.Request) {
 
 	// Create guest user
 	user := models.NewGuestUser()
-	client := websocket.NewClient(hub, conn, user)
+	client := wsocket.NewClient(hub, conn, user)
 	hub.RegisterClient(client)
 
 	// Start read and write pumps
@@ -38,7 +40,7 @@ func ServeWS(hub *websocket.Hub, w http.ResponseWriter, r *http.Request) {
 }
 
 // HandleWebSocketMessage processes incoming WebSocket messages
-func HandleWebSocketMessage(hub *websocket.Hub, roomManager *services.RoomManager, gameEngine *services.GameEngine, client *websocket.Client, message *websocket.Message) {
+func HandleWebSocketMessage(hub *wsocket.Hub, roomManager *services.RoomManager, gameEngine *services.GameEngine, client *wsocket.Client, message *wsocket.Message) {
 	switch message.Type {
 	case models.MessageTypeConnect:
 		handleConnect(hub, client, message)
@@ -61,21 +63,33 @@ func HandleWebSocketMessage(hub *websocket.Hub, roomManager *services.RoomManage
 	case models.MessageTypeListPublicRooms:
 		handleListPublicRooms(hub, roomManager, client, message)
 	default:
-		client.SendError("Unknown message type", "UNKNOWN_MESSAGE_TYPE")
+		// Note: Using a helper function to send error since sendError is not exported
+		sendClientError(client, "Unknown message type", "UNKNOWN_MESSAGE_TYPE")
 	}
 }
 
+// Helper function to send error messages
+func sendClientError(client *wsocket.Client, message, code string) {
+	// Create an error message and send it
+	errorMsg, err := wsocket.NewErrorMessage(message, code)
+	if err != nil {
+		log.Printf("Error creating error message: %v", err)
+		return
+	}
+	client.SendMessage(errorMsg)
+}
+
 // handleConnect processes a connection message
-func handleConnect(hub *websocket.Hub, client *websocket.Client, message *websocket.Message) {
+func handleConnect(hub *wsocket.Hub, client *wsocket.Client, message *wsocket.Message) {
 	var data models.ConnectData
 	if err := message.UnmarshalData(&data); err != nil {
-		client.SendError("Invalid connect data", "INVALID_DATA")
+		sendClientError(client, "Invalid connect data", "INVALID_DATA")
 		return
 	}
 
 	// Validate and sanitize username
 	if !utils.ValidateUserName(data.Username) {
-		client.SendError("Invalid username", "INVALID_USERNAME")
+		sendClientError(client, "Invalid username", "INVALID_USERNAME")
 		return
 	}
 	data.Username = utils.SanitizeInput(data.Username)
@@ -91,16 +105,16 @@ func handleConnect(hub *websocket.Hub, client *websocket.Client, message *websoc
 }
 
 // handleCreateRoom processes room creation
-func handleCreateRoom(hub *websocket.Hub, roomManager *services.RoomManager, client *websocket.Client, message *websocket.Message) {
+func handleCreateRoom(hub *wsocket.Hub, roomManager *services.RoomManager, client *wsocket.Client, message *wsocket.Message) {
 	var data models.CreateRoomData
 	if err := message.UnmarshalData(&data); err != nil {
-		client.SendError("Invalid room creation data", "INVALID_DATA")
+		sendClientError(client, "Invalid room creation data", "INVALID_DATA")
 		return
 	}
 
 	// Validate input
 	if !utils.ValidateUserName(data.RoomName) {
-		client.SendError("Invalid room name", "INVALID_ROOM_NAME")
+		sendClientError(client, "Invalid room name", "INVALID_ROOM_NAME")
 		return
 	}
 	data.RoomName = utils.SanitizeInput(data.RoomName)
@@ -113,7 +127,7 @@ func handleCreateRoom(hub *websocket.Hub, roomManager *services.RoomManager, cli
 	// Create room
 	room := roomManager.CreateRoom(client.GetUser().ID, roomType, data.RoomName, data)
 	if room == nil {
-		client.SendError("Failed to create room", "ROOM_CREATION_FAILED")
+		sendClientError(client, "Failed to create room", "ROOM_CREATION_FAILED")
 		return
 	}
 
@@ -123,9 +137,9 @@ func handleCreateRoom(hub *websocket.Hub, roomManager *services.RoomManager, cli
 
 	// Send room created message
 	roomInfo := room.GetPublicRoomInfo()
-	msg, err := websocket.NewRoomCreatedMessage(roomInfo)
+	msg, err := wsocket.NewRoomCreatedMessage(roomInfo)
 	if err != nil {
-		client.SendError("Failed to create room message", "MESSAGE_CREATION_FAILED")
+		sendClientError(client, "Failed to create room message", "MESSAGE_CREATION_FAILED")
 		return
 	}
 	client.SendMessage(msg)
@@ -133,40 +147,45 @@ func handleCreateRoom(hub *websocket.Hub, roomManager *services.RoomManager, cli
 	// Broadcast to all about new public room
 	if room.Type == models.RoomTypePublic {
 		publicRooms := roomManager.GetPublicRooms()
-		roomsMsg, err := websocket.NewPublicRoomsListMessage(publicRooms)
+		roomsMsg, err := wsocket.NewPublicRoomsListMessage(publicRooms)
 		if err != nil {
 			log.Printf("Error creating public rooms list message: %v", err)
 			return
 		}
-		hub.BroadcastToAll(roomsMsg.ToJSON())
+		jsonData, err := roomsMsg.ToJSON()
+		if err != nil {
+			log.Printf("Error converting rooms message to JSON: %v", err)
+			return
+		}
+		hub.BroadcastToAll(jsonData)
 	}
 }
 
 // handleJoinRoom processes joining a room
-func handleJoinRoom(hub *websocket.Hub, roomManager *services.RoomManager, client *websocket.Client, message *websocket.Message) {
+func handleJoinRoom(hub *wsocket.Hub, roomManager *services.RoomManager, client *wsocket.Client, message *wsocket.Message) {
 	var data models.JoinRoomData
 	if err := message.UnmarshalData(&data); err != nil {
-		client.SendError("Invalid join room data", "INVALID_DATA")
+		sendClientError(client, "Invalid join room data", "INVALID_DATA")
 		return
 	}
 
 	// Validate room code
 	data.RoomCode = utils.NormalizeRoomCode(data.RoomCode)
 	if !utils.ValidateRoomCode(data.RoomCode) {
-		client.SendError("Invalid room code", "INVALID_ROOM_CODE")
+		sendClientError(client, "Invalid room code", "INVALID_ROOM_CODE")
 		return
 	}
 
 	// Find room by code
 	room := roomManager.GetRoomByCode(data.RoomCode)
 	if room == nil {
-		client.SendError("Room not found", "ROOM_NOT_FOUND")
+		sendClientError(client, "Room not found", "ROOM_NOT_FOUND")
 		return
 	}
 
 	// Join room
 	if !roomManager.JoinRoom(room.ID, client.GetUser().ID, client.GetUser()) {
-		client.SendError("Failed to join room", "JOIN_FAILED")
+		sendClientError(client, "Failed to join room", "JOIN_FAILED")
 		return
 	}
 
@@ -175,33 +194,38 @@ func handleJoinRoom(hub *websocket.Hub, roomManager *services.RoomManager, clien
 
 	// Send room joined message to client
 	roomInfo := room.GetPublicRoomInfo()
-	roomMsg, err := websocket.NewRoomJoinedMessage(roomInfo)
+	roomMsg, err := wsocket.NewRoomJoinedMessage(roomInfo)
 	if err != nil {
-		client.SendError("Failed to create room joined message", "MESSAGE_CREATION_FAILED")
+		sendClientError(client, "Failed to create room joined message", "MESSAGE_CREATION_FAILED")
 		return
 	}
 	client.SendMessage(roomMsg)
 
 	// Notify other players
-	playerMsg, err := websocket.NewPlayerJoinedMessage(client.GetUser().ToPublicUser())
+	playerMsg, err := wsocket.NewPlayerJoinedMessage(client.GetUser().ToPublicUser())
 	if err != nil {
 		log.Printf("Error creating player joined message: %v", err)
 		return
 	}
-	hub.BroadcastToRoom(room.ID, playerMsg.ToJSON(), client)
+	jsonData, err := playerMsg.ToJSON()
+	if err != nil {
+		log.Printf("Error converting player joined message to JSON: %v", err)
+		return
+	}
+	hub.BroadcastToRoom(room.ID, jsonData, client)
 }
 
 // handleLeaveRoom processes leaving a room
-func handleLeaveRoom(hub *websocket.Hub, roomManager *services.RoomManager, client *websocket.Client, message *websocket.Message) {
+func handleLeaveRoom(hub *wsocket.Hub, roomManager *services.RoomManager, client *wsocket.Client, message *wsocket.Message) {
 	roomID := client.GetRoomID()
 	if roomID == "" {
-		client.SendError("Not in a room", "NOT_IN_ROOM")
+		sendClientError(client, "Not in a room", "NOT_IN_ROOM")
 		return
 	}
 
 	room := roomManager.GetRoom(roomID)
 	if room == nil {
-		client.SendError("Room not found", "ROOM_NOT_FOUND")
+		sendClientError(client, "Room not found", "ROOM_NOT_FOUND")
 		return
 	}
 
@@ -210,38 +234,43 @@ func handleLeaveRoom(hub *websocket.Hub, roomManager *services.RoomManager, clie
 	hub.RemoveClientFromRoom(client, roomID)
 
 	// Notify other players
-	playerMsg, err := websocket.NewPlayerLeftMessage(client.GetUser().ToPublicUser())
+	playerMsg, err := wsocket.NewPlayerLeftMessage(client.GetUser().ToPublicUser())
 	if err != nil {
 		log.Printf("Error creating player left message: %v", err)
 		return
 	}
-	hub.BroadcastToRoom(roomID, playerMsg.ToJSON(), nil)
+	jsonData, err := playerMsg.ToJSON()
+	if err != nil {
+		log.Printf("Error converting player left message to JSON: %v", err)
+		return
+	}
+	hub.BroadcastToRoom(roomID, jsonData, nil)
 
 	// Send confirmation to client
 	client.SendSystemMessage("You have left the room")
 }
 
 // handleStartGame processes game start request
-func handleStartGame(hub *websocket.Hub, roomManager *services.RoomManager, gameEngine *services.GameEngine, client *websocket.Client, message *websocket.Message) {
+func handleStartGame(hub *wsocket.Hub, roomManager *services.RoomManager, gameEngine *services.GameEngine, client *wsocket.Client, message *wsocket.Message) {
 	roomID := client.GetRoomID()
 	if roomID == "" {
-		client.SendError("Not in a room", "NOT_IN_ROOM")
+		sendClientError(client, "Not in a room", "NOT_IN_ROOM")
 		return
 	}
 
 	room := roomManager.GetRoom(roomID)
 	if room == nil {
-		client.SendError("Room not found", "ROOM_NOT_FOUND")
+		sendClientError(client, "Room not found", "ROOM_NOT_FOUND")
 		return
 	}
 
 	if room.HostID != client.GetUser().ID {
-		client.SendError("Only host can start game", "NOT_HOST")
+		sendClientError(client, "Only host can start game", "NOT_HOST")
 		return
 	}
 
 	if !room.CanStart() {
-		client.SendError("Not enough players or not all ready", "CANNOT_START")
+		sendClientError(client, "Not enough players or not all ready", "CANNOT_START")
 		return
 	}
 
@@ -249,27 +278,27 @@ func handleStartGame(hub *websocket.Hub, roomManager *services.RoomManager, game
 }
 
 // handleDrawStart processes start of a drawing action
-func handleDrawStart(hub *websocket.Hub, roomManager *services.RoomManager, client *websocket.Client, message *websocket.Message) {
+func handleDrawStart(hub *wsocket.Hub, roomManager *services.RoomManager, client *wsocket.Client, message *wsocket.Message) {
 	roomID := client.GetRoomID()
 	if roomID == "" {
-		client.SendError("Not in a room", "NOT_IN_ROOM")
+		sendClientError(client, "Not in a room", "NOT_IN_ROOM")
 		return
 	}
 
 	room := roomManager.GetRoom(roomID)
 	if room == nil {
-		client.SendError("Room not found", "ROOM_NOT_FOUND")
+		sendClientError(client, "Room not found", "ROOM_NOT_FOUND")
 		return
 	}
 
 	if room.CurrentDrawer != client.GetUser().ID {
-		client.SendError("Not your turn to draw", "NOT_DRAWER")
+		sendClientError(client, "Not your turn to draw", "NOT_DRAWER")
 		return
 	}
 
 	var data models.DrawStartData
 	if err := message.UnmarshalData(&data); err != nil {
-		client.SendError("Invalid draw data", "INVALID_DATA")
+		sendClientError(client, "Invalid draw data", "INVALID_DATA")
 		return
 	}
 
@@ -282,7 +311,7 @@ func handleDrawStart(hub *websocket.Hub, roomManager *services.RoomManager, clie
 	}
 	room.AddDrawCommand(drawCmd)
 
-	drawMsg, err := websocket.NewDrawDataMessage(websocket.DrawDataMessage{
+	drawMsg, err := wsocket.NewDrawDataMessage(wsocket.DrawDataMessage{
 		Type:   "start",
 		X:      data.X,
 		Y:      data.Y,
@@ -294,31 +323,36 @@ func handleDrawStart(hub *websocket.Hub, roomManager *services.RoomManager, clie
 		log.Printf("Error creating draw data message: %v", err)
 		return
 	}
-	hub.BroadcastToRoom(roomID, drawMsg.ToJSON(), client)
+	jsonData, err := drawMsg.ToJSON()
+	if err != nil {
+		log.Printf("Error converting draw message to JSON: %v", err)
+		return
+	}
+	hub.BroadcastToRoom(roomID, jsonData, client)
 }
 
 // handleDrawMove processes ongoing drawing action
-func handleDrawMove(hub *websocket.Hub, roomManager *services.RoomManager, client *websocket.Client, message *websocket.Message) {
+func handleDrawMove(hub *wsocket.Hub, roomManager *services.RoomManager, client *wsocket.Client, message *wsocket.Message) {
 	roomID := client.GetRoomID()
 	if roomID == "" {
-		client.SendError("Not in a room", "NOT_IN_ROOM")
+		sendClientError(client, "Not in a room", "NOT_IN_ROOM")
 		return
 	}
 
 	room := roomManager.GetRoom(roomID)
 	if room == nil {
-		client.SendError("Room not found", "ROOM_NOT_FOUND")
+		sendClientError(client, "Room not found", "ROOM_NOT_FOUND")
 		return
 	}
 
 	if room.CurrentDrawer != client.GetUser().ID {
-		client.SendError("Not your turn to draw", "NOT_DRAWER")
+		sendClientError(client, "Not your turn to draw", "NOT_DRAWER")
 		return
 	}
 
 	var data models.DrawMoveData
 	if err := message.UnmarshalData(&data); err != nil {
-		client.SendError("Invalid draw data", "INVALID_DATA")
+		sendClientError(client, "Invalid draw data", "INVALID_DATA")
 		return
 	}
 
@@ -329,7 +363,7 @@ func handleDrawMove(hub *websocket.Hub, roomManager *services.RoomManager, clien
 	}
 	room.AddDrawCommand(drawCmd)
 
-	drawMsg, err := websocket.NewDrawDataMessage(websocket.DrawDataMessage{
+	drawMsg, err := wsocket.NewDrawDataMessage(wsocket.DrawDataMessage{
 		Type:   "move",
 		X:      data.X,
 		Y:      data.Y,
@@ -339,31 +373,36 @@ func handleDrawMove(hub *websocket.Hub, roomManager *services.RoomManager, clien
 		log.Printf("Error creating draw data message: %v", err)
 		return
 	}
-	hub.BroadcastToRoom(roomID, drawMsg.ToJSON(), client)
+	jsonData, err := drawMsg.ToJSON()
+	if err != nil {
+		log.Printf("Error converting draw message to JSON: %v", err)
+		return
+	}
+	hub.BroadcastToRoom(roomID, jsonData, client)
 }
 
 // handleDrawEnd processes end of drawing action
-func handleDrawEnd(hub *websocket.Hub, roomManager *services.RoomManager, client *websocket.Client, message *websocket.Message) {
+func handleDrawEnd(hub *wsocket.Hub, roomManager *services.RoomManager, client *wsocket.Client, message *wsocket.Message) {
 	roomID := client.GetRoomID()
 	if roomID == "" {
-		client.SendError("Not in a room", "NOT_IN_ROOM")
+		sendClientError(client, "Not in a room", "NOT_IN_ROOM")
 		return
 	}
 
 	room := roomManager.GetRoom(roomID)
 	if room == nil {
-		client.SendError("Room not found", "ROOM_NOT_FOUND")
+		sendClientError(client, "Room not found", "ROOM_NOT_FOUND")
 		return
 	}
 
 	if room.CurrentDrawer != client.GetUser().ID {
-		client.SendError("Not your turn to draw", "NOT_DRAWER")
+		sendClientError(client, "Not your turn to draw", "NOT_DRAWER")
 		return
 	}
 
 	var data models.DrawEndData
 	if err := message.UnmarshalData(&data); err != nil {
-		client.SendError("Invalid draw data", "INVALID_DATA")
+		sendClientError(client, "Invalid draw data", "INVALID_DATA")
 		return
 	}
 
@@ -374,7 +413,7 @@ func handleDrawEnd(hub *websocket.Hub, roomManager *services.RoomManager, client
 	}
 	room.AddDrawCommand(drawCmd)
 
-	drawMsg, err := websocket.NewDrawDataMessage(websocket.DrawDataMessage{
+	drawMsg, err := wsocket.NewDrawDataMessage(wsocket.DrawDataMessage{
 		Type:   "end",
 		X:      data.X,
 		Y:      data.Y,
@@ -384,43 +423,53 @@ func handleDrawEnd(hub *websocket.Hub, roomManager *services.RoomManager, client
 		log.Printf("Error creating draw data message: %v", err)
 		return
 	}
-	hub.BroadcastToRoom(roomID, drawMsg.ToJSON(), client)
+	jsonData, err := drawMsg.ToJSON()
+	if err != nil {
+		log.Printf("Error converting draw message to JSON: %v", err)
+		return
+	}
+	hub.BroadcastToRoom(roomID, jsonData, client)
 }
 
 // handleSendGuess processes a player's guess
-func handleSendGuess(hub *websocket.Hub, roomManager *services.RoomManager, gameEngine *services.GameEngine, client *websocket.Client, message *websocket.Message) {
+func handleSendGuess(hub *wsocket.Hub, roomManager *services.RoomManager, gameEngine *services.GameEngine, client *wsocket.Client, message *wsocket.Message) {
 	roomID := client.GetRoomID()
 	if roomID == "" {
-		client.SendError("Not in a room", "NOT_IN_ROOM")
+		sendClientError(client, "Not in a room", "NOT_IN_ROOM")
 		return
 	}
 
 	room := roomManager.GetRoom(roomID)
 	if room == nil {
-		client.SendError("Room not found", "ROOM_NOT_FOUND")
+		sendClientError(client, "Room not found", "ROOM_NOT_FOUND")
 		return
 	}
 
 	if room.State != models.GameStatePlaying || room.Phase != models.GamePhaseDrawing {
-		client.SendError("Game not in progress", "INVALID_STATE")
+		sendClientError(client, "Game not in progress", "INVALID_STATE")
 		return
 	}
 
 	var data models.GuessData
 	if err := message.UnmarshalData(&data); err != nil {
-		client.SendError("Invalid guess data", "INVALID_DATA")
+		sendClientError(client, "Invalid guess data", "INVALID_DATA")
 		return
 	}
 
 	data.Guess = utils.SanitizeInput(data.Guess)
 
 	// Broadcast guess as chat message
-	chatMsg, err := websocket.NewChatMessage(client.GetUser().Username, data.Guess, false)
+	chatMsg, err := wsocket.NewChatMessage(client.GetUser().Username, data.Guess, false)
 	if err != nil {
 		log.Printf("Error creating chat message: %v", err)
 		return
 	}
-	hub.BroadcastToRoom(roomID, chatMsg.ToJSON(), nil)
+	chatJsonData, err := chatMsg.ToJSON()
+	if err != nil {
+		log.Printf("Error converting chat message to JSON: %v", err)
+		return
+	}
+	hub.BroadcastToRoom(roomID, chatJsonData, nil)
 
 	// Validate guess
 	result := gameEngine.ValidateGuess(room, client.GetUser().ID, data.Guess)
@@ -429,7 +478,7 @@ func handleSendGuess(hub *websocket.Hub, roomManager *services.RoomManager, game
 	}
 
 	// Send guess result to player
-	resultMsg, err := websocket.NewGuessResultMessage(result)
+	resultMsg, err := wsocket.NewGuessResultMessage(result)
 	if err != nil {
 		log.Printf("Error creating guess result message: %v", err)
 		return
@@ -437,7 +486,7 @@ func handleSendGuess(hub *websocket.Hub, roomManager *services.RoomManager, game
 	client.SendMessage(resultMsg)
 
 	// Broadcast points awarded
-	pointsMsg, err := websocket.NewPointsMessage(
+	pointsMsg, err := wsocket.NewPointsMessage(
 		client.GetUser().ID,
 		client.GetUser().Username,
 		result.Points,
@@ -448,15 +497,25 @@ func handleSendGuess(hub *websocket.Hub, roomManager *services.RoomManager, game
 		log.Printf("Error creating points message: %v", err)
 		return
 	}
-	hub.BroadcastToRoom(roomID, pointsMsg.ToJSON(), nil)
+	pointsJsonData, err := pointsMsg.ToJSON()
+	if err != nil {
+		log.Printf("Error converting points message to JSON: %v", err)
+		return
+	}
+	hub.BroadcastToRoom(roomID, pointsJsonData, nil)
 
 	// Update leaderboard
-	leaderboardMsg, err := websocket.NewLeaderboardMessage(getLeaderboard(room), room.CurrentRound, room.MaxRounds)
+	leaderboardMsg, err := wsocket.NewLeaderboardMessage(getLeaderboard(room), room.CurrentRound, room.MaxRounds)
 	if err != nil {
 		log.Printf("Error creating leaderboard message: %v", err)
 		return
 	}
-	hub.BroadcastToRoom(roomID, leaderboardMsg.ToJSON(), nil)
+	leaderboardJsonData, err := leaderboardMsg.ToJSON()
+	if err != nil {
+		log.Printf("Error converting leaderboard message to JSON: %v", err)
+		return
+	}
+	hub.BroadcastToRoom(roomID, leaderboardJsonData, nil)
 
 	// Check if round should end
 	if result.RoundEnding {
@@ -465,11 +524,11 @@ func handleSendGuess(hub *websocket.Hub, roomManager *services.RoomManager, game
 }
 
 // handleListPublicRooms sends list of public rooms
-func handleListPublicRooms(hub *websocket.Hub, roomManager *services.RoomManager, client *websocket.Client, message *websocket.Message) {
+func handleListPublicRooms(hub *wsocket.Hub, roomManager *services.RoomManager, client *wsocket.Client, message *wsocket.Message) {
 	rooms := roomManager.GetPublicRooms()
-	msg, err := websocket.NewPublicRoomsListMessage(rooms)
+	msg, err := wsocket.NewPublicRoomsListMessage(rooms)
 	if err != nil {
-		client.SendError("Failed to list rooms", "LIST_ROOMS_FAILED")
+		sendClientError(client, "Failed to list rooms", "LIST_ROOMS_FAILED")
 		return
 	}
 	client.SendMessage(msg)
