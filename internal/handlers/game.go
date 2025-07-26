@@ -2,7 +2,7 @@ package handlers
 
 import (
 	"log"
-	"sort"
+
 	"time"
 
 	"github.com/RITWIZSINGH/DoodleDash-backend/internal/models"
@@ -27,7 +27,12 @@ func HandleGameStart(hub *websocket.Hub, roomManager *services.RoomManager, game
 		log.Printf("Error creating game started message: %v", err)
 		return
 	}
-	hub.BroadcastToRoom(roomID, msg.ToJSON(), nil)
+	msgData, err := msg.ToJSON()
+	if err != nil {
+		log.Printf("Error converting message to JSON: %v", err)
+		return
+	}
+	hub.BroadcastToRoom(roomID, msgData, nil)
 
 	// Start first round
 	HandleNewRound(hub, roomManager, gameEngine, roomID)
@@ -83,7 +88,18 @@ func HandleNewRound(hub *websocket.Hub, roomManager *services.RoomManager, gameE
 		log.Printf("Error creating new round message: %v", err)
 		return
 	}
-	hub.BroadcastToRoom(roomID, othersMsg.ToJSON(), hub.GetClientByUserID(room.CurrentDrawer))
+	othersMsgData, err := othersMsg.ToJSON()
+	if err != nil {
+		log.Printf("Error converting others message to JSON: %v", err)
+		return
+	}
+
+	drawerClient, drawerExists := hub.GetClientByUserID(room.CurrentDrawer)
+	var excludeClient *websocket.Client
+	if drawerExists {
+		excludeClient = drawerClient
+	}
+	hub.BroadcastToRoom(roomID, othersMsgData, excludeClient)
 
 	// Start timer
 	go runRoundTimer(hub, roomManager, gameEngine, roomID)
@@ -107,11 +123,17 @@ func HandleRoundEnd(hub *websocket.Hub, roomManager *services.RoomManager, gameE
 	guessers := make([]websocket.GuesserResult, 0, len(room.Players))
 	for _, userID := range room.GuessedPlayers {
 		if player, exists := room.GetPlayer(userID); exists {
+			var points int
+			if player.GuessOrder > 0 {
+				points = gameEngine.CalculateGuesserPoints(player.GuessOrder, len(room.GuessedPlayers), int(player.GuessTime.Sub(room.RoundStartTime).Seconds()), room.RoundTime, len(room.Players), string(room.Difficulty))
+			} else {
+				points = 0
+			}
 			guessers = append(guessers, websocket.GuesserResult{
 				UserID:     player.ID,
 				Username:   player.Username,
 				Guessed:    true,
-				Points:     player.GuessOrder > 0 ? gameEngine.CalculateGuesserPoints(player.GuessOrder, len(room.GuessedPlayers), int(player.GuessTime.Sub(room.RoundStartTime).Seconds()), room.RoundTime, len(room.Players), string(room.Difficulty)) : 0,
+				Points:     points,
 				GuessOrder: player.GuessOrder,
 				GuessTime:  int(player.GuessTime.Sub(room.RoundStartTime).Seconds()),
 			})
@@ -140,8 +162,10 @@ func HandleRoundEnd(hub *websocket.Hub, roomManager *services.RoomManager, gameE
 		Leaderboard:  getLeaderboard(room),
 		NextRound:    room.CurrentRound + 1,
 	}
-	if room decidedly {
-		roundEndData.NextRound = 0
+
+	// Check if this is the last round
+	if room.CurrentRound >= room.MaxRounds {
+		roundEndData.NextRound = 0 // Indicate game is ending
 	}
 
 	room.EndRound()
@@ -153,7 +177,12 @@ func HandleRoundEnd(hub *websocket.Hub, roomManager *services.RoomManager, gameE
 		log.Printf("Error creating round ended message: %v", err)
 		return
 	}
-	hub.BroadcastToRoom(roomID, msg.ToJSON(), nil)
+	msgData, err := msg.ToJSON()
+	if err != nil {
+		log.Printf("Error converting round ended message to JSON: %v", err)
+		return
+	}
+	hub.BroadcastToRoom(roomID, msgData, nil)
 
 	// Check if game should end
 	if room.CurrentRound >= room.MaxRounds {
@@ -196,11 +225,11 @@ func HandleGameEnd(hub *websocket.Hub, roomManager *services.RoomManager, gameEn
 		Winner:      winner,
 		Leaderboard: leaderboard,
 		GameStats: websocket.GameStats{
-			TotalRounds:    room.CurrentRound,
-			TotalPlayers:   len(room.Players),
-			AverageScore:   float64(totalScore) / float64(len(room.Players)),
-			HighestScore:   highestScore,
-			PlayerStats:    playerStats,
+			TotalRounds:  room.CurrentRound,
+			TotalPlayers: len(room.Players),
+			AverageScore: float64(totalScore) / float64(len(room.Players)),
+			HighestScore: highestScore,
+			PlayerStats:  playerStats,
 		},
 	}
 
@@ -212,7 +241,12 @@ func HandleGameEnd(hub *websocket.Hub, roomManager *services.RoomManager, gameEn
 		log.Printf("Error creating game ended message: %v", err)
 		return
 	}
-	hub.BroadcastToRoom(roomID, msg.ToJSON(), nil)
+	msgData, err := msg.ToJSON()
+	if err != nil {
+		log.Printf("Error converting game ended message to JSON: %v", err)
+		return
+	}
+	hub.BroadcastToRoom(roomID, msgData, nil)
 }
 
 // runRoundTimer manages the round timer
@@ -234,7 +268,12 @@ func runRoundTimer(hub *websocket.Hub, roomManager *services.RoomManager, gameEn
 				log.Printf("Error creating timer message: %v", err)
 				continue
 			}
-			hub.BroadcastToRoom(roomID, timerMsg.ToJSON(), nil)
+			timerData, err := timerMsg.ToJSON()
+			if err != nil {
+				log.Printf("Error converting timer message to JSON: %v", err)
+				continue
+			}
+			hub.BroadcastToRoom(roomID, timerData, nil)
 
 			if timeLeft <= 0 {
 				HandleRoundEnd(hub, roomManager, gameEngine, roomID)
