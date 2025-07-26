@@ -1,0 +1,55 @@
+server:
+  port: ":8080"
+  read_timeout: 15s
+  write_timeout: 15s
+  idle_timeout: 60s
+
+websocket:
+  read_buffer_size: 1024
+  write_buffer_size: 1024
+  max_message_size: 512
+  pong_wait: 60s
+  ping_period: 54s
+  write_wait: 10s
+
+game:
+  max_players_per_room: 8
+  min_players_to_start: 2
+  round_duration: 60s
+  max_rounds: 5
+  room_cleanup_interval: 5m
+  inactive_room_timeout: 30m
+
+points:
+  base_guess_points: 100
+  max_order_bonus: 50
+  max_difficulty_bonus: 100
+  max_time_bonus: 25
+  drawer_base_points: 20
+  drawer_bonus_per_guesser: 15
+
+rate_limit:
+  requests_per_minute: 60
+  burst_size: 10
+
+cors:
+  allowed_origins:
+    - "http://localhost:3000"
+    - "http://localhost:8080"
+    - "https://yourdomain.com"
+  allowed_methods:
+    - "GET"
+    - "POST" 
+    - "PUT"
+    - "DELETE"
+    - "OPTIONS"
+  allowed_headers:
+    - "Origin"
+    - "Content-Type"
+    - "Accept"
+    - "Authorization"
+
+word_bank:
+  easy_words_file: "data/words_easy.json"
+  medium_words_file: "data/words_medium.json" 
+  hard_words_file: "data/words_hard.json"
